@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"text/template"
@@ -501,12 +503,39 @@ func AuthenticateToProvider(provider OIDCProvider) error {
 		return fmt.Errorf("failed to complete the provider preflight check: %s", err)
 	}
 
-	log.Info("Starting auth browser session. Please check your browser instances...")
-
 	if err := utils.OpenURL(provider.GenerateAuthUrl()); err != nil {
-		return fmt.Errorf("failed to open browser session: %s", err)
+		log.Warnf("Failed to open browser: %s", err)
+		log.Info("Please visit the following URL to authenticate")
+		d := provider.(*GoogleOIDC)
+		d.Oauth2Config.RedirectURL = "urn:ietf:wg:oauth:2.0:oob"
+		log.Infof("URL: %s", provider.GenerateAuthUrl())
+		println("")
+		fmt.Print("Enter verification code: ")
+		reader := bufio.NewReader(os.Stdin)
+		code, _ := reader.ReadString('\n')
+		code = strings.TrimSpace(code)
+		if code == "" {
+			return errors.New("Verification code not provided")
+		}
+
+		// create context and exchange authCode for token
+		ctx := oidc.ClientContext(oauth2.NoContext, d.httpClient)
+		token, err := d.Oauth2Config.Exchange(ctx, code)
+		if err != nil {
+			return fmt.Errorf("Failed to exchange auth code: %s", err)
+		}
+
+		log.Info("exchanged authCode for JWT token. Refresh token was supplied")
+		log.Infof("writing credentials to %s", d.kubeConfig)
+
+		if err := d.writeK8sConfig(token); err != nil {
+			return fmt.Errorf("Failed to write k8s config: %s", err)
+		}
+
+		return nil
 	}
 
+	log.Info("Starting auth browser session. Please check your browser instances...")
 	log.Info("Spawning http server to receive callbacks")
 
 	// spawn HTTP server
